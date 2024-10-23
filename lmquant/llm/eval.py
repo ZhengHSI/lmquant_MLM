@@ -14,7 +14,7 @@ import torch.nn as nn
 from datasets import load_dataset
 from omniconfig import configclass
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer,AutoModel
 
 from lmquant.eval.config import BaseEvaluationConfig
 from lmquant.utils import tools

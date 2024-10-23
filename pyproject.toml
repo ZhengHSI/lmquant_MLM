@@ -27,6 +27,12 @@ isort = ">= 5.13"
 black = ">= 24.4.0"
 matplotlib = ">= 3.8.4"
 
+
+[[tool.poetry.source]]
+name = "mirrors"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+priority = "primary"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

@@ -35,7 +35,8 @@ class BaseModelConfig(ABC):
         self.family = self.name.split("-")[0]
         self.local_root = os.path.expanduser(self.local_root)
         if self.local_path is None:
-            self.local_path = os.path.join(self.local_root, self.family, self.name)
+            # self.local_path = os.path.join(self.local_root, self.family, self.name)
+            self.local_path = os.path.join(self.local_root, self.name)
         if self.path is None:
             self.path = os.path.join(self.root, self.family, self.name)
         if os.path.exists(self.local_path):

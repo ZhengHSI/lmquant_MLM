@@ -548,6 +548,18 @@ class LlmQuantConfig(ModuleQuantizerConfig):
                 config.ipts = self.select_ipts.router
         return config
 
+    def get_lm_head(self, *, layer_idx: int = -1) -> ModuleQuantizerConfig:
+        """Get the first feed-forward network quantization configuration."""
+        config = ModuleQuantizerConfig(wgts=self.wgts, ipts=self.ipts, opts=None)
+        # TODO: pass
+        # if self.select_wgts is not None and self.select_wgts.lm_head is not None:
+        #     if self.select_wgts.lm_head.is_selected(self.num_hidden_layers):
+        #         config.wgts = self.select_wgts.lm_head
+        # if self.select_ipts is not None and self.select_ipts.proj_1st is not None:
+        #     if self.select_ipts.proj_1st.is_selected(self.num_hidden_layers):
+        #         config.ipts = self.select_ipts.lm_head
+        return config
+        
     def specialize_for(self, key: str, *, layer_idx: int = -1) -> ModuleQuantizerConfig:
         """Get the quantization configuration for the specified key."""
         return getattr(self, f"get_{key}")(layer_idx=layer_idx)

@@ -201,13 +201,16 @@ def smooth_llm(
                 leave=False,
                 total=model.config.num_hidden_layers,
             ):
-                smooth_llm_decoder_layer(
-                    layer=layer,
-                    config=quant_config,
-                    smooth_cache=smooth_cache,
-                    layer_cache=layer_cache,
-                    layer_kwargs=layer_kwargs,
-                )
+                if _ == "llm.lm_head":
+                    continue
+                else:
+                    smooth_llm_decoder_layer(
+                        layer=layer,
+                        config=quant_config,
+                        smooth_cache=smooth_cache,
+                        layer_cache=layer_cache,
+                        layer_kwargs=layer_kwargs,
+                    )
     else:
         for layer in model.backbone_struct.layer_structs:
             smooth_llm_decoder_layer(layer=layer, config=quant_config, smooth_cache=smooth_cache)

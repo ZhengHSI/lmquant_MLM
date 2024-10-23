@@ -1,5 +1,5 @@
 calib:
-  num_samples: 128
+  num_samples: 32
   seq_length: 2048
   min_seq_length: 2048
   max_seq_length: 0
@@ -41,6 +41,7 @@ quant:
       max_shrink: 0.2
       max_expand: 1.0
       num_grids: 100
+    skip_head: true
   ipts:
     static: false
     dtype: null
@@ -59,3 +60,21 @@ quant:
     group_scale_dtypes:
     - torch.float16
     compute_dtype: null
+  # enable_smooth: true
+  # smooth:
+  #   enable_xw: true
+  #   xw:
+  #     objective: OutputsError
+  #     strategy: GridSearch
+  #     granularity: Layer
+  #     ranges:
+  #     - - AbsMax
+  #       - AbsMax
+  #     alpha: 0.5
+  #     beta: 0
+  #     num_grids: 20
+  #     skip_proj_qkv: false
+  #     skip_proj_out: false
+  #     skip_proj_1st: false
+  #     skip_proj_2nd: false
+  #   enable_yx: false

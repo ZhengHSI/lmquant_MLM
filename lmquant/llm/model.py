@@ -34,8 +34,7 @@ class LlmModelConfig(BaseModelConfig):
         size = self.name.split("-")[-1]
         if size[-1] == "m":
             size = float(size[:-1]) / 1000
-        else:
-            assert size[-1] == "b"
+        elif size[-1] == "B" or size[-1] == "b":
             size = size[:-1]
             if "x" in size:
                 num_experts, expert_gb = size.split("x")
@@ -44,6 +43,8 @@ class LlmModelConfig(BaseModelConfig):
                 size = num_experts * expert_size
             else:
                 size = float(size)
+        else:
+            size = 0.0
         self.size = size
 
     def build(

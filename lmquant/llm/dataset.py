@@ -8,10 +8,12 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from datasets import load_dataset
+from datasets import load_dataset,load_from_disk
 from omniconfig import configclass
 from transformers.cache_utils import DynamicCache
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
+from transformers import AutoModel, AutoTokenizer,AutoProcessor
+
 
 from lmquant.dataset.cache.action import AverageCache, CacheAction, ConcatCache
 from lmquant.dataset.cache.activation import ActivationCache, IOActivationsCache
@@ -19,7 +21,7 @@ from lmquant.dataset.cache.calibration import CalibrationCache
 from lmquant.dataset.config import BaseCalibDatasetConfig
 from lmquant.dataset.transform import LinearTransformFn
 
-from .nn import LlmDecoderLayerStruct, LlmModelStruct, RotaryEmbedding
+from .nn import LlmDecoderLayerStruct, LlmModelStruct, RotaryEmbedding, VitDecoderLayerStruct, VitModelStruct
 
 __all__ = ["LlmCalibConfig", "LlmCalibrationCache", "LlmConcatCache", "LlmAverageCache"]
 
@@ -96,6 +98,48 @@ class LlmAverageCache(AverageCache):
             args = (kwargs["hidden_states"],)
         return args
 
+def load_lenovo(root_folder):
+    import os
+    import json
+    from PIL import Image
+    import re
+
+    result_list = []
+    image_tag_pattern = r"\u003Cimage\u003E.*?\u003C\/image\u003E"
+
+    for folder_name in os.listdir(root_folder):
+        sub_folder_path = os.path.join(root_folder, folder_name)
+        if os.path.isdir(sub_folder_path):
+            json_file = None
+            image_file = None
+            for file_name in os.listdir(sub_folder_path):
+                if file_name.endswith(".json"):
+                    json_file = os.path.join(sub_folder_path, file_name)
+                elif file_name.endswith(".png"):
+                    image_file = os.path.join(sub_folder_path, file_name)
+            
+            if json_file and image_file:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                task_description = None
+                for item in data:
+                    if item.get('from') == 'human':
+                        task_description = item.get('value')
+                        
+                        # 去除以 <image> 开头的部分
+                        task_description = re.sub(image_tag_pattern, "", task_description)
+                        break
+                
+                image = Image.open(image_file)
+
+                if task_description:
+                    result_list.append({
+                        "question": task_description,
+                        "image": image
+                    })
+
+    return result_list
 
 class LlmCalibrationCache(CalibrationCache):
     """Cache for collecting calibration dataset for quantizing large language models."""
@@ -201,6 +245,85 @@ class LlmCalibrationCache(CalibrationCache):
             samples = samples[: self.config.num_samples]
             for sample in samples:
                 yield sample
+        elif self.config.data == "MME":
+            dataset = load_from_disk(self.config.dataset_path)["test"]
+            dataset = dataset.shuffle(seed=42)
+            processor = AutoProcessor.from_pretrained("/home/workspace/model/minicpm-vit-1b", trust_remote_code=True)
+            rng = random.Random(42)
+            samples, num_tokens = [], 0
+            prompts_lists = []
+            input_images_lists = []
+            for index, _data in enumerate(dataset):
+                promt = _data["question"]
+                image = _data["image"]
+                msgs = [{'role': 'user', 'content': "(<image>./</image>)\n"+ promt}]
+                prompts_lists.append(processor.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True))
+                input_images_lists.append([image])
+                if index >= self.config.num_samples:
+                    break
+            inputs = processor(
+                prompts_lists,
+                input_images_lists,
+                max_slice_nums=9,
+                use_image_id=True,
+                return_tensors="pt",
+                max_length=8192
+            )
+            sample = inputs
+            yield sample
+        elif self.config.data == "MME-2":
+            dataset = load_from_disk(self.config.dataset_path)["test"]
+            dataset = dataset.shuffle(seed=42)
+            processor = AutoProcessor.from_pretrained("/home/workspace/model/MiniCPM-V-1B-sft-v2-1B", trust_remote_code=True)
+            rng = random.Random(42)
+            samples, num_tokens = [], 0
+            prompts_lists = []
+            input_images_lists = []
+            for index, _data in enumerate(dataset):
+                promt = _data["question"]
+                image = _data["image"]
+                msgs = [{'role': 'user', 'content': "(<image>./</image>)\n"+ promt}]
+                prompts_lists.append(processor.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True))
+                input_images_lists.append([image])
+                if index >= self.config.num_samples:
+                    break
+                
+            inputs = processor(
+                prompts_lists,
+                input_images_lists,
+                max_slice_nums=9,
+                use_image_id=True,
+                return_tensors="pt",
+                max_length=8192
+            )
+            sample = inputs
+            yield sample
+        elif self.config.data == "lenovo":
+            dataset = load_lenovo(self.config.dataset_path)
+            processor = AutoProcessor.from_pretrained("/home/workspace/model/MiniCPM-V-1B-sft-v2-1B", trust_remote_code=True)
+            rng = random.Random(42)
+            samples, num_tokens = [], 0
+            prompts_lists = []
+            input_images_lists = []
+            for index, _data in enumerate(dataset):
+                promt = _data["question"]
+                image = _data["image"]
+                msgs = [{'role': 'user', 'content': "(<image>./</image>)\n"+ promt}]
+                prompts_lists.append(processor.tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True))
+                input_images_lists.append([image])
+                if index >= self.config.num_samples:
+                    break
+                
+            inputs = processor(
+                prompts_lists,
+                input_images_lists,
+                max_slice_nums=9,
+                use_image_id=True,
+                return_tensors="pt",
+                max_length=8192
+            )
+            sample = inputs
+            yield sample
         else:
             raise NotImplementedError(f"Calibration dataset {self.config.data} is not supported")
 
@@ -249,11 +372,13 @@ class LlmCalibrationCache(CalibrationCache):
                     - input and output caches for each module in the layer,
                     - layer input keyword arguments.
         """
-        if isinstance(model, LlmModelStruct):
+        # 多模态这里先注释掉 
+        if isinstance(model, LlmModelStruct) or isinstance(model, VitModelStruct):
             model_struct = model
             model = model_struct.module
         else:
             model_struct = LlmModelStruct.build(model)
+            
         backbone_struct = model_struct.backbone_struct
         layer_structs = backbone_struct.layer_structs
         action = LlmConcatCache("cpu") if action is None else action
@@ -269,21 +394,31 @@ class LlmCalibrationCache(CalibrationCache):
                 **kwargs,
             )
         ):
-            layer_struct = layer_structs[layer_idx]
-            assert layer_idx == layer_struct.idx
-            assert layer_name == layer_struct.full_name
-            assert layer is layer_struct.module
-            if layer_struct.proj_v_full_name in layer_cache:
-                cache = layer_cache[layer_struct.proj_v_full_name]
-                layer_cache[layer_struct.proj_q_full_name] = cache
-                layer_cache[layer_struct.proj_k_full_name] = cache
-            if layer_struct.proj_1st_full_names[0] in layer_cache:
-                for expert_idx in range(layer_struct.config.num_experts):
-                    cache = layer_cache[layer_struct.proj_1st_full_names[expert_idx]]
-                    for name in layer_struct.proj_1st_full_names[expert_idx :: layer_struct.config.num_experts]:
-                        layer_cache[name] = cache
-                if layer_struct.config.num_experts == 1 and layer_struct.ffn_block_full_name not in layer_cache:
-                    layer_cache[layer_struct.ffn_block_full_name] = layer_cache[layer_struct.proj_1st_full_names[0]]
-            if layer_struct.config.num_experts > 1 and layer_struct.ffn_block_full_name in layer_cache:
-                layer_cache[layer_struct.router_full_name] = layer_cache[layer_struct.ffn_block_full_name]
+            # print("------------------layer_name--------------",layer_name)
+            # print("------------------layer_name--------------",layer_name)
+            if layer_name == "llm.lm_head":
+                layer_struct = model_struct.fc
+            else:
+                layer_struct = layer_structs[layer_idx]
+                # assert layer_idx == layer_struct.idx
+                # assert layer_name == layer_struct.full_name
+                # assert layer is layer_struct.module
+                # print("------------------layer_name--------------",layer_name)
+                # print("------------------layer_struct.full_name--------------",layer_struct.full_name)
+                layer_struct.update_full_name(layer_name)
+                # print("------------------layer_struct.full_name--------------",layer_struct.full_name)
+
+                if layer_struct.proj_v_full_name in layer_cache:
+                    cache = layer_cache[layer_struct.proj_v_full_name]
+                    layer_cache[layer_struct.proj_q_full_name] = cache
+                    layer_cache[layer_struct.proj_k_full_name] = cache
+                if layer_struct.proj_1st_full_names[0] in layer_cache:
+                    for expert_idx in range(layer_struct.config.num_experts):
+                        cache = layer_cache[layer_struct.proj_1st_full_names[expert_idx]]
+                        for name in layer_struct.proj_1st_full_names[expert_idx :: layer_struct.config.num_experts]:
+                            layer_cache[name] = cache
+                    if layer_struct.config.num_experts == 1 and layer_struct.ffn_block_full_name not in layer_cache:
+                        layer_cache[layer_struct.ffn_block_full_name] = layer_cache[layer_struct.proj_1st_full_names[0]]
+                if layer_struct.config.num_experts > 1 and layer_struct.ffn_block_full_name in layer_cache:
+                    layer_cache[layer_struct.router_full_name] = layer_cache[layer_struct.ffn_block_full_name]
             yield layer_name, (layer_struct, layer_cache, layer_kwargs)

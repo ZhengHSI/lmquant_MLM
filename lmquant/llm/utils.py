@@ -21,6 +21,9 @@ def get_needs_inputs_fn(config: LlmQuantConfig) -> tp.Callable[[str, nn.Module],
     """
 
     def needs_inputs(name: str, module: nn.Module) -> bool:
+        # print("--------------name-----------",name)
+        if name.endswith("lm_head"):
+            return True
         if name.endswith("self_attn"):  # self attention block
             return True
         elif name.endswith("block_sparse_moe") or name.endswith("mlp"):  # feed forward block
@@ -35,6 +38,11 @@ def get_needs_inputs_fn(config: LlmQuantConfig) -> tp.Callable[[str, nn.Module],
                 if name.endswith("up_proj") or name.endswith("w3"):
                     return True
             return False
+        elif name.endswith("fc1"):
+            if config.needs_quant_weights(name, module) or config.needs_quant_inputs(name, module):
+                if name.endswith("fc1"):
+                    return True
+            return True
         else:
             return config.needs_quant_inputs(name, module) or config.needs_quant_weights(name, module)
 

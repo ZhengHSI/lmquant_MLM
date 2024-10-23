@@ -9,13 +9,13 @@ import pprint
 
 import torch
 import torch.utils.hooks
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel,AutoProcessor
 
 from lmquant.quant.quantizer import ActivationQuantizer, WeightQuantizer
 from lmquant.utils import tools
 
 from .config import LlmRunConfig
-from .nn import LlmModelStruct
+from .nn import LlmModelStruct, VitModelStruct
 from .quant import quantize_llm_activations, quantize_llm_weights, reorder_llm, rotate_llm, smooth_llm
 
 __all__ = ["run"]
@@ -72,7 +72,13 @@ def run(  # noqa: C901
     quant_acts = quant_ipts or quant_opts
     quant = quant_wgts or quant_acts
     needs_rotation = quant and config.quant.enabled_rotation
+
+    #多模态量化模式
+    mlm_mode = True
+    vit_mode = False
     # region rotate model
+
+    #模型导入
     if needs_rotation:
         logger.info(f"* Building model {config.model.name} from {config.model.path}")
         model, tokenizer = config.model.build(dtype=torch.float32, cpu=config.model.size > 30)
@@ -113,6 +119,24 @@ def run(  # noqa: C901
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
+    elif mlm_mode:
+        logger.info(f"* Building model {config.model.name} from {config.model.path}")
+        model = AutoModel.from_pretrained(config.model.path, trust_remote_code=True,attn_implementation='sdpa', torch_dtype=torch.bfloat16)
+        tokenizer = AutoTokenizer.from_pretrained(config.model.path, trust_remote_code=True)
+        if model.processor is None:
+            model.processor = AutoProcessor.from_pretrained(config.model.path, trust_remote_code=True)
+        model = LlmModelStruct.build(model)
+        model.module = model.module.cuda()
+        config.quant.num_hidden_layers = model.config.num_hidden_layers
+    elif vit_mode:
+        logger.info(f"* Building model {config.model.name} from {config.model.path}")
+        model = AutoModel.from_pretrained(config.model.path, trust_remote_code=True,attn_implementation='sdpa', torch_dtype=torch.float16)
+        tokenizer = AutoTokenizer.from_pretrained(config.model.path, trust_remote_code=True)
+        if model.processor is None:
+            model.processor = AutoProcessor.from_pretrained(config.model.path, trust_remote_code=True)
+        model = VitModelStruct.build(model)
+        model.module = model.module.cuda()
+        config.quant.num_hidden_layers = model.config.num_hidden_layers
     else:
         logger.info(f"* Building model {config.model.name} from {config.model.path}")
         model, tokenizer = config.model.build(dtype=torch.float16)
@@ -122,8 +146,10 @@ def run(  # noqa: C901
             config.quant.develop_dtype = torch.float32
         logger.info(f"* Development dtype is {config.quant.develop_dtype}")
     # endregion
+
     hooks: dict[str, dict[str, list[torch.utils.hooks.RemovableHandle]]] = dict(reorder={}, activation={})
-    # region reorder channels
+    
+    # region reorder channels 这里暂时先用不到
     if quant and config.quant.enabled_reorder:
         logger.info("* Reordering channels")
         tools.logging.Formatter.indent_inc()
@@ -146,7 +172,9 @@ def run(  # noqa: C901
         gc.collect()
         torch.cuda.empty_cache()
     # endregion
+
     # region smooth quantization
+    #激活平滑,这里暂时先用不到，这会导致权重的量化难度更大
     if quant and config.quant.enabled_smooth:
         logger.info("* Smooth quantizing model")
         tools.logging.Formatter.indent_inc()
@@ -165,6 +193,7 @@ def run(  # noqa: C901
         gc.collect()
         torch.cuda.empty_cache()
     # endregion
+
     # region collect original state dict
     if config.quant.needs_orig_wgts:
         orig_state_dict: dict[str, torch.Tensor] = {
@@ -175,9 +204,12 @@ def run(  # noqa: C901
     else:
         orig_state_dict = None
     # endregion
+
+    #权重量化，这里只对decoder层作量化，lmhead没有做量化
     if quant_wgts:
         logger.info("* Quantizing weights")
         tools.logging.Formatter.indent_inc()
+        #直接导入量化结果
         if config.cache_path.wgts and os.path.exists(config.cache_path.wgts):
             logger.info(f"- Loading weight settings from {config.cache_path.wgts}")
             _, weight_quantizers, scale_state_dict = quantize_llm_weights(
@@ -189,6 +221,7 @@ def run(  # noqa: C901
                 return_with_quantizers=return_with_quantizers,
                 return_with_scale_state_dict=return_with_scale_state_dict or config.save_model,
             )
+        #开始量化
         else:
             logger.info("- Generating weight settings")
             quant_cache, weight_quantizers, scale_state_dict = quantize_llm_weights(
@@ -207,7 +240,9 @@ def run(  # noqa: C901
         if config.save_model:
             logger.info(f"- Saving model to {config.output_dirpath}")
             torch.save(scale_state_dict, os.path.join(output_dirpath, "scale.pt"))
-            torch.save(model.module.state_dict(), os.path.join(output_dirpath, "model.pt"))
+            # torch.save(model.module.state_dict(), os.path.join(output_dirpath, "model.pt"))
+            # model.module.save_pretrained(output_dirpath, safe_serialization=True)
+            model.module.save_pretrained(output_dirpath,safe_serialization=False,max_shard_size="100GB")
             if not return_with_scale_state_dict:
                 scale_state_dict = {}
         tools.logging.Formatter.indent_dec()
@@ -216,6 +251,9 @@ def run(  # noqa: C901
     else:
         weight_quantizers: dict[str, WeightQuantizer] = {}
         scale_state_dict: dict[str, torch.Tensor] = {}
+    
+
+    #量化激活
     if quant_acts:
         logger.info("  * Quantizing activations")
         tools.logging.Formatter.indent_inc()
@@ -252,6 +290,8 @@ def run(  # noqa: C901
         torch.cuda.empty_cache()
     else:
         activation_quantizers: dict[str, ActivationQuantizer] = {}
+    
+    #模型验证
     # region evaluate model
     logger.info("* Evaluating model")
     tools.logging.Formatter.indent_inc()

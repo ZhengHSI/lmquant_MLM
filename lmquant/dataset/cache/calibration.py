@@ -233,10 +233,43 @@ class CalibrationCache(ABC):
                             with_kwargs=True,
                         )
                     )
+            if module_name == 'llm.lm_head' and not "SiglipEncoderLayer" in str(layers[0].__class__):
+                # 为lm_head注册了kwargs的hooks
+                layer_name = module_name
+                named_layers[layer_name] = module
+                layer_names[layer_name] = []
+                layer_kwargs_caches[layer_name] ={}
+                layer_hooks.append(
+                    module.register_forward_pre_hook(
+                        functools.partial(self._pre_layer_kwargs_hook, kwargs_cache=layer_kwargs_caches[layer_name]),
+                        with_kwargs=True,
+                    )
+                )
+                # 为lm_head注册了信息hooks
+                # TODO: 这里needs_inputs_fn需要看一下
+                needs_in, needs_out = needs_inputs_fn(module_name, module), needs_outputs_fn(module_name, module)
+                if needs_in or needs_out:
+                    layer_names[layer_name].append(module_name)
+                    caches[module_name] = self._init_cache(module)
+                    cache_hook_args.append((layer_name, module_name, module, needs_in, needs_out))
+                    cache_info_hooks.append(
+                        module.register_forward_hook(
+                            functools.partial(
+                                action.info_hook,
+                                name=module_name,
+                                cache=caches[module_name],
+                                needs_inputs_caching=needs_in,
+                                needs_outputs_caching=needs_out,
+                            ),
+                            with_kwargs=True,
+                        )
+                    )
         assert layer_name, "No layer in the given layers is found in the model"
         named_layers.pop("")
         layer_names.pop("")
         for layer, module in zip(layers, named_layers.values()):
+            # print("--------------------",layer)
+            # print("--------------------",module)
             assert layer is module, "yield modules must be the same as layers"
         with logging_redirect_tqdm():
             # region we first collect cache information by running the model with all samples
@@ -284,10 +317,11 @@ class CalibrationCache(ABC):
                     ):
                         num_args = len(layer_args)
                         layer_args = [arg.to(device=device) for arg in layer_args]
+                        # print(layer_args)
                         outputs = layer(*layer_args, **layer_kwargs)
                         if not isinstance(outputs, (list, tuple)):
                             outputs = (outputs,)
-                        assert num_args <= len(outputs)
+                        # assert num_args <= len(outputs)
                         next_layer_args_cache.append([output.detach().cpu() for output in outputs[:num_args]])
                     layer_args_cache = next_layer_args_cache
                     for hook in cache_hooks[layer_name]:

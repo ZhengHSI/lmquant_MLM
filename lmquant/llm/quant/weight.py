@@ -14,7 +14,7 @@ from lmquant.quant.quantizer.weight import WeightQuantizer
 from lmquant.utils import tools
 
 from ..dataset import LlmCalibConfig, LlmCalibrationCache
-from ..nn import LlmDecoderLayerStruct, LlmModelStruct
+from ..nn import LlmDecoderLayerStruct, LlmModelStruct, VitModelStruct
 from ..utils import get_needs_inputs_fn
 from .config import LlmQuantConfig
 
@@ -46,41 +46,59 @@ def quantize_llm_decoder_layer_weights(  # noqa: C901
         tuple[dict[str, WeightQuantizer], dict[str, torch.Tensor | float | None]: Quantizers, and scale state dict.
     """
     logger = logging.getLogger(f"{__name__}.WeightQuant")
-    logger.debug("- Quantizing decoder layer %s", layer.full_name)
+
+    current_lm_head = False
+    try:
+        logger.debug("- Quantizing decoder layer %s", layer.full_name)
+    except AttributeError:
+        logger.debug("- Quantizing decoder layer lm_head")
+        current_lm_head = True
+
     tools.logging.Formatter.indent_inc()
     layer_cache = layer_cache or {}
     layer_kwargs = layer_kwargs or {}
-
     args_caches: list[tuple[str, nn.Module, str, nn.Module, str, dict]] = []
-    # region proj_q and proj_k
-    attn_kwargs = layer.filter_layer_kwargs_to_attn_kwargs(layer_kwargs)
-    key = "proj_qkv"
-    for module_name, module in [(layer.proj_q_full_name, layer.proj_q), (layer.proj_k_full_name, layer.proj_k)]:
-        args_caches.append((key, module, module_name, layer.attn_block, layer.attn_block_full_name, attn_kwargs))
-    # endregion
-    # region proj_v and proj_o
-    for key, module_name, module in [
-        ("proj_qkv", layer.proj_v_full_name, layer.proj_v),
-        ("proj_out", layer.proj_o_full_name, layer.proj_o),
-    ]:
-        args_caches.append((key, module, module_name, module, module_name, None))
-    # endregion
-    # region ffn block
-    if layer.router is not None:
-        key, module_name, module = "router", layer.router_full_name, layer.router
-        args_caches.append((key, module, module_name, module, module_name, None))
-    num_experts = layer.config.num_experts
-    for expert_idx in range(num_experts):
-        key = "proj_1st"
-        for module_name, module in zip(
-            layer.proj_1st_full_names[expert_idx::num_experts], layer.proj_1st[expert_idx::num_experts]
-        ):
+
+    if not current_lm_head:
+        # region proj_q and proj_k
+        attn_kwargs = layer.filter_layer_kwargs_to_attn_kwargs(layer_kwargs)
+        key = "proj_qkv"
+        for module_name, module in [(layer.proj_q_full_name, layer.proj_q), (layer.proj_k_full_name, layer.proj_k)]:
+            args_caches.append((key, module, module_name, layer.attn_block, layer.attn_block_full_name, attn_kwargs))
+        # endregion
+        # region proj_v and proj_o
+        for key, module_name, module in [
+            ("proj_qkv", layer.proj_v_full_name, layer.proj_v),
+            ("proj_out", layer.proj_o_full_name, layer.proj_o),
+        ]:
             args_caches.append((key, module, module_name, module, module_name, None))
-        key, module_name, module = "proj_2nd", layer.proj_2nd_full_names[expert_idx], layer.proj_2nd[expert_idx]
+        # endregion
+        # region ffn block
+        if layer.router is not None:
+            key, module_name, module = "router", layer.router_full_name, layer.router
+            args_caches.append((key, module, module_name, module, module_name, None))
+        num_experts = layer.config.num_experts
+        for expert_idx in range(num_experts):
+            key = "proj_1st"
+            for module_name, module in zip(
+                layer.proj_1st_full_names[expert_idx::num_experts], layer.proj_1st[expert_idx::num_experts]
+            ):
+                args_caches.append((key, module, module_name, module, module_name, None))
+            key, module_name, module = "proj_2nd", layer.proj_2nd_full_names[expert_idx], layer.proj_2nd[expert_idx]
+            args_caches.append((key, module, module_name, module, module_name, None))
+        # endregion
+    else:
+        # NOTE: lm_head的量化
+        key = "lm_head"
+        module = layer
+        module_name = "llm.lm_head"
         args_caches.append((key, module, module_name, module, module_name, None))
-    # endregion
+
     for key, module, module_name, eval_module, eval_name, eval_kwargs in args_caches:
-        quantizer_config = config.specialize_for(key, layer_idx=layer.idx).wgts
+        if key == "lm_head":
+            quantizer_config = config.specialize_for(key).wgts
+        else:
+            quantizer_config = config.specialize_for(key, layer_idx=layer.idx).wgts
         quantizer = WeightQuantizer(quantizer_config, develop_dtype=config.develop_dtype, key=key)
         if quantizer.enabled:
             if module_name not in quant_cache:
@@ -97,13 +115,18 @@ def quantize_llm_decoder_layer_weights(  # noqa: C901
                 torch.cuda.empty_cache()
     quantizers: dict[str, WeightQuantizer] = {}
     scale_state_dict: dict[str, torch.Tensor | float | None] = {}
+
     for key, module, module_name, eval_module, eval_name, eval_kwargs in args_caches:
-        quantizer_config = config.specialize_for(key, layer_idx=layer.idx).wgts
+        if key == "lm_head":
+            quantizer_config = config.specialize_for(key).wgts
+        else:
+            quantizer_config = config.specialize_for(key, layer_idx=layer.idx).wgts
         quantizer = WeightQuantizer(quantizer_config, develop_dtype=config.develop_dtype, key=key)
         param_name = f"{module_name}.weight"
         if quantizer.enabled:
             logger.debug("- Quantizing %s", param_name)
             quantizer.load_state_dict(quant_cache[module_name], device=module.weight.device)
+            # print("---------------module_name----------------",module_name)
             result = quantizer.quantize(
                 module.weight.data,
                 inputs=layer_cache.get(module_name, IOActivationsCache()).inputs,
@@ -163,9 +186,11 @@ def quantize_llm_weights(
             dict[str, torch.Tensor | float | None
         ]: Quantization cache, quantizers, and scale state dict.
     """
-    if not isinstance(model, LlmModelStruct):
-        model = LlmModelStruct.build(model)
-    assert isinstance(model, LlmModelStruct)
+    # 多模态部分先注释掉
+    # if not isinstance(model, LlmModelStruct):
+    #     model = LlmModelStruct.build(model)
+    assert isinstance(model, LlmModelStruct) or isinstance(model, VitModelStruct)
+    
     quant_cache = quant_cache or {}
     quantizers: dict[str, WeightQuantizer] = {}
     scale_state_dict: dict[str, torch.Tensor | float | None] = {}
@@ -182,6 +207,9 @@ def quantize_llm_weights(
                 leave=False,
                 total=model.config.num_hidden_layers,
             ):
+                # print("------------------layer.full_name--------------",layer.full_name)
+                if "head" in quant_config.wgts.skips and "lm_head" in _:
+                    continue
                 block_quantizers, block_state_dict = quantize_llm_decoder_layer_weights(
                     layer=layer,
                     config=quant_config,

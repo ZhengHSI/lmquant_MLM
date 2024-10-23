@@ -12,3 +12,6 @@ python -m lmquant.llm.run configs/llm.yaml configs/gptq.yaml --model-name llama3
 
 # GPTQ-R (W4A16) on Llama3-70B
 python -m lmquant.llm.run configs/llm.yaml configs/gptq.yaml --model-name llama3-70b
+
+# GPTQ-R (W4A16) on minicpmv
+python -m lmquant.llm.run configs/mlm.yaml configs/gptq.yaml --model-name MiniCPM-V-1B-sft-v2-1B
